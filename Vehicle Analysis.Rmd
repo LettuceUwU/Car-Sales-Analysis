@@ -1,0 +1,320 @@
+---
+title: "Vehicle Analysis"
+author: "Glorija"
+date: "2024-07-02"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(dplyr)
+library(tidyr)
+library(caret)
+library(ranger)
+library(ggplot2)
+library(gridExtra)
+library(mgcv)
+library(progressr)
+library(car)
+library(glmnet)
+library(Hmisc)
+
+
+data <- read.csv("C:\\Users\\glori\\Desktop\\R studies\\Vehicle Analysis\\clean_vehicle_data.csv")
+
+```
+
+## Introduction
+
+This is a presentation of my findings while investigating the dataset car_prices
+
+### The dataset has been cleaned and filtered:
+
+- Removed irrelevant columns such as: trim, vin, body, state, interior, body, seller, and sell date;
+- Cleared non-sensical data, missing values, and NAs;
+- Made unique makes and colors uniform;
+
+## Data Summary
+
+```{r Summary, echo = TRUE}
+summary(data)
+head(data)
+str(data)
+```
+
+## EDA
+- I used a correlation matrix to check numerical predictor relationship with the target and Linear Regression to assess the F and p values, as well as ANOVA test for categorical variables
+
+```{r eda}
+## Correlation Analysis for Numerical Variables
+# Numerical Variables - Correlation Matrix
+numerical_vars <- data %>% select(year, mmr, odometer, condition, sellingprice)
+cor_matrix <- cor(numerical_vars)
+high_corr <- findCorrelation(cor_matrix, cutoff = 0.75)
+selected_numerical_vars <- numerical_vars[ , -high_corr]
+
+# Display correlation matrix and selected numerical variables
+cat("### Correlation Matrix:\n")
+print(cor_matrix)
+
+# ANOVA
+anova_full <- aov(sellingprice ~ make + color + transmission, data = data)
+cat("### ANOVA:\n")
+summary(anova_full)
+
+# Perform linear regression
+cat("###Linear Regression:\n")
+model_numerical <- lm(sellingprice ~ year + mmr + odometer + condition, data = data)
+cat("### Linear Regression:\n")
+summary(model_numerical)
+```
+
+## Random Forest Model
+- Correlation matrix and ANOVA didn't return desirable output so I used Random Forest for its robustness and ability to handle complex interactions between variables without requiring much preprocessing (for data with numerical and categorical variables such as this one)
+- Random Forest accounts for interaction between variables rather just individual relationships between target and predictors, unlike in filter methods
+- Random Forests are robust to overfitting, especially when dealing with large datasets, because they average the predictions of multiple trees, reducing variance
+- Random Forest can model both linear and non-linear relationships by building multiple decision trees that split the data based on different predictor values. Each tree captures different aspects of the data, including linear and non-linear patterns
+- I also displayed the importance of each predictor in predicting the target variable, and used Random Forest model as a variable selection method
+
+```{r random forest}
+data <- read.csv("C:\\Users\\glori\\Desktop\\R studies\\Vehicle Analysis\\clean_vehicle_data.csv")
+
+# Convert condition to numeric for modeling
+data$condition <- as.numeric(as.character(data$condition))
+
+# Select predictors and target variable
+predictors <- data[, c("year", "mmr", "odometer", "condition", "make", "color", "transmission")]
+target <- data$sellingprice
+
+# Train a Random Forest model
+rf_model <- ranger(
+  formula = sellingprice ~ .,
+  data = data,
+  num.trees = 100,
+  importance = 'impurity',
+  verbose = TRUE
+)
+
+# Print variable importance
+importance_scores <- importance(rf_model)
+importance_df <- data.frame(Variable = names(importance_scores), Importance = importance_scores)
+
+# Convert importance to percentages
+importance_df$Importance <- importance_df$Importance / sum(importance_df$Importance) * 100
+
+# Plot variable importance with percentages
+ggplot(importance_df, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = paste0(round(Importance, 2), "%")), hjust = -0.2, size = 3.5) +
+  coord_flip() +
+  labs(title = "Variable Importance from Random Forest Model", x = "Variable", y = "Importance (%)") +
+  theme_minimal()
+
+# Predict on the training data
+rf_predictions <- predict(rf_model, data = data)$predictions
+
+# Calculate R-squared and other metrics
+rf_r_squared <- cor(rf_predictions, data$sellingprice)^2
+rf_rmse <- sqrt(mean((data$sellingprice - rf_predictions)^2))
+rf_mae <- mean(abs(data$sellingprice - rf_predictions))
+
+# Print the metrics
+print(paste("Random Forest R-squared:", rf_r_squared))
+print(paste("Random Forest RMSE:", rf_rmse))
+print(paste("Random Forest MAE:", rf_mae))
+
+# Scatter plots to explore relationships between numerical features and selling price
+p1 <- ggplot(data, aes(x = year, y = sellingprice)) + 
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = "lm", col = "red") + 
+  ggtitle("Year vs Selling Price")
+
+p2 <- ggplot(data, aes(x = mmr, y = sellingprice)) + 
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = "lm", col = "red") + 
+  ggtitle("MMR vs Selling Price")
+
+p3 <- ggplot(data, aes(x = odometer, y = sellingprice)) + 
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = "lm", col = "red") + 
+  ggtitle("Odometer vs Selling Price")
+
+p4 <- ggplot(data, aes(x = as.numeric(condition), y = sellingprice)) + 
+  geom_point(alpha = 0.5) + 
+  geom_smooth(method = "lm", col = "red") + 
+  ggtitle("Condition vs Selling Price")
+
+# Arrange plots
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+
+## VIF
+# Assuming selected_vars is the vector containing selected variable names
+selected_vars <- c("year", "mmr", "odometer", "condition")
+
+# Construct the formula
+formula <- as.formula(paste("sellingprice ~", paste(selected_vars, collapse = " + ")))
+
+# Fit the model
+model <- lm(formula, data = data)
+vif_values <- vif(model)
+print(vif_values)
+```
+
+- I used Scatter plots to visualize the relationship between numerical features (year, mmr, odometer, condition) and the selling price
+-I added a linear regression line to show the trend between the variables
+
+## GAM
+- Since 3 of the 4 predictors had non-linear relationships with the target,
+I chose GAM model for its flexibility in capturing the non-linear relationships
+- GAMs extend linear models by allowing non-linear functions of predictors. They use smooth functions (splines) to model the relationship between each predictor and the target variable, accommodating non-linearity
+- GAMs fit each predictor’s effect separately, which can be advantageous when different predictors have different types of non-linear relationships with the target variable
+```{r gam}
+# Fit a GAM model
+gam_model <- gam(sellingprice ~ s(year) + s(mmr) + s(odometer) + s(condition), data = data)
+
+# Summary of GAM model
+summary(gam_model)
+
+# Plot smooth terms
+par(mfrow = c(2, 2))
+plot(gam_model, shade = TRUE, pages = 1)
+
+# Predict on the training data
+gam_predictions <- predict(gam_model, newdata = data)
+
+# Calculate R-squared and other metrics
+gam_r_squared <- cor(gam_predictions, data$sellingprice)^2
+gam_rmse <- sqrt(mean((data$sellingprice - gam_predictions)^2))
+gam_mae <- mean(abs(data$sellingprice - gam_predictions))
+
+# Print the metrics
+print(paste("GAM R-squared:", gam_r_squared))
+print(paste("GAM RMSE:", gam_rmse))
+print(paste("GAM MAE:", gam_mae))
+```
+
+## Random Forest Cross-Validation
+- I used k-Fold Cross-Validation to assess the model's performance by dividing the data into k subsets, training on k-1 subsets, and testing on the remaining subset
+- Example usage with different k values (k_values <- c(5, 10, 15)), has proven that 10-Fold Cross-Validation provided a good balance between bias and variance in the performance estimate
+
+```{r rf cross-validation}
+# Define the formula for the Random Forest model
+formula_selected <- sellingprice ~ year + mmr + odometer + condition
+# Define k-fold cross-validation function for Random Forest with additional metrics
+cross_validate_rf <- function(data, formula, k_folds = 10, num_trees = 100) {
+  folds <- createFolds(data$sellingprice, k = k_folds, list = TRUE, returnTrain = TRUE)
+  rmse_values <- numeric(k_folds)
+  r_squared_values <- numeric(k_folds)
+  mae_values <- numeric(k_folds)
+  
+  for (i in 1:k_folds) {
+    train_indices <- folds[[i]]
+    train_data <- data[train_indices, ]
+    test_data <- data[-train_indices, ]
+    rf_model <- ranger(formula, data = train_data, num.trees = num_trees, importance = 'impurity')
+    predictions <- predict(rf_model, data = test_data)$predictions
+    rmse_values[i] <- sqrt(mean((test_data$sellingprice - predictions)^2))
+    r_squared_values[i] <- cor(predictions, test_data$sellingprice)^2
+    mae_values[i] <- mean(abs(test_data$sellingprice - predictions))
+  }
+  
+  mean_rmse <- mean(rmse_values)
+  mean_r_squared <- mean(r_squared_values)
+  mean_mae <- mean(mae_values)
+  
+  return(list(rmse = mean_rmse, r_squared = mean_r_squared, mae = mean_mae))
+}
+
+# Perform cross-validation
+rf_cv_results <- cross_validate_rf(data, formula_selected, k_folds = 10, num_trees = 100)
+print(paste("Average RMSE from k-fold cross-validation (RF):", rf_cv_results$rmse))
+print(paste("Average R-squared from k-fold cross-validation (RF):", rf_cv_results$r_squared))
+print(paste("Average MAE from k-fold cross-validation (RF):", rf_cv_results$mae))
+
+```
+
+## GAM Cross-Validation
+
+```{r gam cross-validation}
+
+formula_gam <- sellingprice ~ s(year) + s(mmr) + s(odometer) + s(condition)
+# Define k-fold cross-validation function for GAM with additional metrics
+cross_validate_gam <- function(data, formula, k_folds = 10) {
+  folds <- createFolds(data$sellingprice, k = k_folds, list = TRUE, returnTrain = TRUE)
+  rmse_values <- numeric(k_folds)
+  r_squared_values <- numeric(k_folds)
+  mae_values <- numeric(k_folds)
+  
+  for (i in 1:k_folds) {
+    train_indices <- folds[[i]]
+    train_data <- data[train_indices, ]
+    test_data <- data[-train_indices, ]
+    gam_model <- gam(formula, data = train_data)
+    predictions <- predict(gam_model, newdata = test_data)
+    rmse_values[i] <- sqrt(mean((test_data$sellingprice - predictions)^2))
+    r_squared_values[i] <- cor(predictions, test_data$sellingprice)^2
+    mae_values[i] <- mean(abs(test_data$sellingprice - predictions))
+  }
+  
+  mean_rmse <- mean(rmse_values)
+  mean_r_squared <- mean(r_squared_values)
+  mean_mae <- mean(mae_values)
+  
+  return(list(rmse = mean_rmse, r_squared = mean_r_squared, mae = mean_mae))
+}
+
+# Perform cross-validation for GAM
+gam_cv_results <- cross_validate_gam(data, formula_gam, k_folds = 10)
+print(paste("Average RMSE from k-fold cross-validation (GAM):", gam_cv_results$rmse))
+print(paste("Average R-squared from k-fold cross-validation (GAM):", gam_cv_results$r_squared))
+print(paste("Average MAE from k-fold cross-validation (GAM):", gam_cv_results$mae))
+
+```
+
+## Conlusion
+
+```{r conclusion}
+cat("\nModel Selection Summary:\n")
+cat("1. Both GAM and Random Forest models show 
+    comparable performance in predicting vehicle selling prices.\n")
+cat("2. The GAM model has a slightly lower RMSE (", gam_cv_results$rmse, ") 
+    compared to the Random Forest model (", rf_cv_results$rmse, ").\n")
+cat("3. The R-squared for GAM (", gam_cv_results$r_squared, ") is also 
+    slightly higher than for Random Forest (", rf_cv_results$r_squared, ").\n")
+cat("4. The MAE for GAM (", gam_cv_results$mae, ") is 
+    comparable to that for Random Forest (", rf_cv_results$mae, ").\n")
+cat("5. Given the small difference in RMSE and R-squared, and 
+    considering factors like interpretability and computational 
+    efficiency, the GAM model is preferred for its simplicity 
+    and better performance.\n")
+
+```
+
+## Model Fitting
+
+```{r model fitting}
+data <- read.csv("C:\\Users\\glori\\Desktop\\R studies\\Vehicle Analysis\\clean_vehicle_data.csv")
+
+# Define the formula for the final GAM model
+formula_final <- sellingprice ~ s(year) + s(mmr) + s(odometer) + s(condition)
+
+# Fit the GAM model to the full dataset
+final_gam_model <- gam(formula_final, data = data)
+
+# Check the summary of the final GAM model
+summary(final_gam_model)
+
+plot(final_gam_model, pages = 1)
+plot(final_gam_model$residuals)
+
+# Residuals vs Fitted
+plot(final_gam_model$fitted.values, final_gam_model$residuals, xlab = "Fitted Values", ylab = "Residuals")
+abline(h = 0, col = "red")
+
+# Calculate RMSE on the full data
+predictions <- predict(final_gam_model, newdata = data)
+rmse <- sqrt(mean((data$sellingprice - predictions)^2))
+print(paste("RMSE on the full dataset:", round(rmse, 2)))
+```
